@@ -9,8 +9,10 @@ import { TotalsSection } from "@/components/reporter/TotalsSection";
 import { ValidationSection } from "@/components/reporter/ValidationSection";
 import { NotesSection } from "@/components/reporter/NotesSection";
 import { TABLE_CATALOG } from "@/config/reporter";
+import { buildReportColumns, defaultRelations } from "@/lib/reportColumns";
 import {
   getColumns,
+  getForeignKeys,
   getKpis,
   getRows,
   getTables,
@@ -50,23 +52,28 @@ async function ReporterContent({
 }) {
   const params = await searchParams;
 
-  // 1) Tabla validada contra la lista blanca y sus columnas reales.
+  // 1) Tabla validada contra la lista blanca, sus columnas reales y sus
+  //    llaves foráneas (con los detalles de cada tabla referenciada).
   const table = resolveTable(params);
-  const columns = await getColumns(table);
+  const [columns, foreignKeys] = await Promise.all([getColumns(table), getForeignKeys(table)]);
 
-  // 2) Campos, filtros, orden, dirección y página validados contra esas columnas.
-  const query = resolveQuery(params, columns, table);
+  // 2) Campos, columnas foráneas, filtros, orden, dirección y página
+  //    validados contra esas columnas.
+  const query = resolveQuery(params, columns, table, foreignKeys);
 
-  // 3) Consultas independientes en paralelo.
+  // 3) Columnas finales de la sección 04: cada llave foránea se sustituye
+  //    por las columnas elegidas de su tabla.
+  const reportColumns = buildReportColumns(query.fields, query.relations, columns, foreignKeys);
+
+  // 4) Consultas independientes en paralelo.
   const [tables, data, kpis] = await Promise.all([
     getTables(),
-    getRows(query, columns),
+    getRows(query, columns, reportColumns, foreignKeys),
     getKpis(),
   ]);
 
   const { label } = TABLE_CATALOG[table];
-  // Solo las columnas marcadas en la sección 03 se muestran en la 04.
-  const selectedColumns = columns.filter((c) => query.fields.includes(c.name));
+  const hrefDefaults = { totalColumns: columns.length, relations: defaultRelations(foreignKeys) };
 
   return (
     <>
@@ -74,13 +81,20 @@ async function ReporterContent({
         <CompanySection />
         <DocumentSection tableLabel={label} />
       </div>
-      <QuerySection tables={tables} columns={columns} query={query} />
+      <QuerySection
+        tables={tables}
+        columns={columns}
+        foreignKeys={foreignKeys}
+        query={query}
+        hrefDefaults={hrefDefaults}
+      />
       <PreviewSection
         title={`Reporte de ${label.toLowerCase()}`}
-        columns={selectedColumns}
+        columns={reportColumns}
         allColumns={columns}
         data={data}
         query={query}
+        hrefDefaults={hrefDefaults}
       />
       <TotalsSection totalRegistros={data.total} kpis={kpis} />
       <ValidationSection />

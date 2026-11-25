@@ -14,8 +14,8 @@ import { SectionCard } from "@/components/ui/SectionCard";
 import { Badge } from "@/components/ui/Badge";
 import { Panel } from "@/components/ui/Panel";
 import { QueryForm } from "@/components/reporter/QueryForm";
-import { reporterHref } from "@/lib/url";
-import type { ColumnInfo, ReporterQuery, TableInfo, TableName } from "@/types/reporter";
+import { reporterHref, type HrefDefaults } from "@/lib/url";
+import type { ColumnInfo, ForeignKeyInfo, ReporterQuery, TableInfo, TableName } from "@/types/reporter";
 
 /** Ícono de cada tabla en la lista "Tablas disponibles". */
 const TABLE_ICONS: Record<TableName, LucideIcon> = {
@@ -31,7 +31,9 @@ const TABLE_ICONS: Record<TableName, LucideIcon> = {
 interface QuerySectionProps {
   tables: TableInfo[];
   columns: ColumnInfo[];
+  foreignKeys: ForeignKeyInfo[];
   query: ReporterQuery;
+  hrefDefaults: HrefDefaults;
 }
 
 /**
@@ -41,7 +43,7 @@ interface QuerySectionProps {
  *   - Campos, filtros y orden viven en <QueryForm> (Client Component): se
  *     editan libremente y se aplican al pulsar "Generar reporte" o A-Z / Z-A.
  */
-export function QuerySection({ tables, columns, query }: QuerySectionProps) {
+export function QuerySection({ tables, columns, foreignKeys, query, hrefDefaults }: QuerySectionProps) {
   const current = tables.find((t) => t.name === query.table)!;
 
   return (
@@ -63,7 +65,9 @@ export function QuerySection({ tables, columns, query }: QuerySectionProps) {
       <QueryForm
         key={reporterHref(query, { page: 1 })}
         columns={columns}
+        foreignKeys={foreignKeys}
         query={query}
+        hrefDefaults={hrefDefaults}
         tableLabel={current.label}
       >
         {/* ---------- Tablas disponibles ---------- */}

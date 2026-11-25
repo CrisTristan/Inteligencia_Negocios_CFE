@@ -7,6 +7,7 @@ import {
   ArrowUpZA,
   Check,
   ChevronDown,
+  Link2,
   Loader2,
   Minus,
   Play,
@@ -24,14 +25,27 @@ import {
   opNeedsValue,
   operatorsFor,
 } from "@/lib/filters";
-import { reporterHref } from "@/lib/url";
-import type { ColumnInfo, FilterOp, ReporterFilter, ReporterQuery, SortDir } from "@/types/reporter";
+import { reporterHref, type HrefDefaults } from "@/lib/url";
+import { buildReportColumns } from "@/lib/reportColumns";
+import { FK_PANEL_ID, ForeignKeyPanel } from "@/components/reporter/ForeignKeyPanel";
+import type {
+  ColumnInfo,
+  FilterOp,
+  ForeignKeyInfo,
+  ReporterFilter,
+  ReporterQuery,
+  SortDir,
+} from "@/types/reporter";
 
 interface QueryFormProps {
   /** Todas las columnas de la tabla elegida. */
   columns: ColumnInfo[];
+  /** Llaves foráneas de la tabla con los detalles de su tabla referenciada. */
+  foreignKeys: ForeignKeyInfo[];
   /** Consulta aplicada (la que hoy muestra la vista previa). */
   query: ReporterQuery;
+  /** Valores por defecto que se omiten de la URL. */
+  hrefDefaults: HrefDefaults;
   /** Nombre legible de la tabla, para el resumen. */
   tableLabel: string;
   /** Panel "Tablas disponibles" (Server Component con <Link>s). */
@@ -51,19 +65,37 @@ interface FilterRow extends ReporterFilter {
  * reporterHref() y se navega del lado del cliente: el servidor vuelve a
  * consultar PostgreSQL y las secciones 04 y 05 se actualizan.
  *
+ * Los campos de tipo "relación" (llaves foráneas) tienen un botón que abre
+ * el panel "Detalles tabla foránea": ahí se eligen las columnas de la tabla
+ * referenciada que sustituyen al ID en el cuerpo del reporte.
+ *
  * Sin JavaScript, el <form method="get"> sigue funcionando: los nombres de
- * los controles (campos, fc, fo, fv, fv2, orden, dir) son los mismos que lee
- * resolveQuery() en el servidor.
+ * los controles (campos, rel, fc, fo, fv, fv2, orden, dir) son los mismos
+ * que lee resolveQuery() en el servidor.
  */
-export function QueryForm({ columns, query, tableLabel, children }: QueryFormProps) {
+export function QueryForm({
+  columns,
+  foreignKeys,
+  query,
+  hrefDefaults,
+  tableLabel,
+  children,
+}: QueryFormProps) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
 
   const [fields, setFields] = useState<string[]>(query.fields);
+  const [relations, setRelations] = useState<Record<string, string[]>>(query.relations);
   const [filters, setFilters] = useState<FilterRow[]>(() =>
     query.filters.map((f, i) => ({ ...f, id: i })),
   );
   const [orderBy, setOrderBy] = useState(query.orderBy);
+  /** Llave foránea cuyo panel de detalles está abierto (solo vista, no se aplica). */
+  const [openFk, setOpenFk] = useState<string | null>(null);
+
+  const fkByColumn = new Map(foreignKeys.map((fk) => [fk.column, fk]));
+  const openFkInfo = openFk ? fkByColumn.get(openFk) : undefined;
+  const reportColumnCount = buildReportColumns(fields, relations, columns, foreignKeys).length;
 
   const typeOf = (field: string) => columns.find((c) => c.name === field)?.type ?? "texto";
   const isComplete = (f: ReporterFilter) => isCompleteFilter(f, typeOf(f.field));
@@ -76,8 +108,8 @@ export function QueryForm({ columns, query, tableLabel, children }: QueryFormPro
 
   // ¿Hay cambios respecto a lo que muestra la vista previa?
   const dirty =
-    JSON.stringify([fields, completeFilters, orderBy]) !==
-    JSON.stringify([query.fields, query.filters, query.orderBy]);
+    JSON.stringify([fields, relations, completeFilters, orderBy]) !==
+    JSON.stringify([query.fields, query.relations, query.filters, query.orderBy]);
 
   /* ---------------- Campos ---------------- */
 
@@ -91,6 +123,33 @@ export function QueryForm({ columns, query, tableLabel, children }: QueryFormPro
 
   function toggleAll() {
     setFields(allSelected ? [] : columns.map((c) => c.name));
+  }
+
+  /* ---------------- Columnas de tablas foráneas ---------------- */
+
+  function toggleRelation(fkColumn: string, column: string) {
+    const fk = fkByColumn.get(fkColumn);
+    if (!fk) return;
+    const current = relations[fkColumn] ?? fk.defaultColumns;
+    const adding = !current.includes(column);
+    if (!adding && current.length === 1) return; // siempre queda al menos una
+    const next = adding ? [...current, column] : current.filter((c) => c !== column);
+    setRelations({
+      ...relations,
+      // Se conserva el orden de las columnas en su tabla.
+      [fkColumn]: fk.refColumns.map((c) => c.name).filter((c) => next.includes(c)),
+    });
+    // Elegir una columna foránea no sirve si el campo está desmarcado: se marca.
+    if (adding && !fields.includes(fkColumn)) toggleField(fkColumn);
+  }
+
+  function toggleAllRelations(fkColumn: string) {
+    const fk = fkByColumn.get(fkColumn);
+    if (!fk) return;
+    const current = relations[fkColumn] ?? fk.defaultColumns;
+    const all = current.length === fk.refColumns.length;
+    setRelations({ ...relations, [fkColumn]: all ? fk.defaultColumns : fk.refColumns.map((c) => c.name) });
+    if (!all && !fields.includes(fkColumn)) toggleField(fkColumn);
   }
 
   /* ---------------- Filtros ---------------- */
@@ -143,8 +202,8 @@ export function QueryForm({ columns, query, tableLabel, children }: QueryFormPro
 
     const href = reporterHref(
       query,
-      { fields, filters: completeFilters, orderBy, dir, page: 1 },
-      columns.length,
+      { fields, relations, filters: completeFilters, orderBy, dir, page: 1 },
+      hrefDefaults,
     );
     startTransition(() => router.push(href, { scroll: false }));
   }
@@ -153,6 +212,10 @@ export function QueryForm({ columns, query, tableLabel, children }: QueryFormPro
     <form method="get" action="/reporter" onSubmit={handleSubmit} className="p-5">
       {/* La tabla viaja oculta para conservarla al enviar el formulario. */}
       <input type="hidden" name="tabla" value={query.table} />
+      {/* Columnas foráneas elegidas (rel=llave.columna). */}
+      {Object.entries(relations).flatMap(([fk, cols]) =>
+        cols.map((col) => <input key={`${fk}.${col}`} type="hidden" name="rel" value={`${fk}.${col}`} />),
+      )}
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[2fr_2.8fr_5.2fr]">
         {children}
@@ -175,13 +238,16 @@ export function QueryForm({ columns, query, tableLabel, children }: QueryFormPro
           <ul className="space-y-1 p-2">
             {columns.map((column) => {
               const checked = fields.includes(column.name);
+              const fk = fkByColumn.get(column.name);
+              const open = openFk === column.name;
               return (
-                <li key={column.name}>
-                  <label
-                    className={`flex cursor-pointer items-center gap-2.5 rounded-md px-2.5 py-2 transition-colors ${
-                      checked ? "bg-slate-50" : "hover:bg-slate-50"
-                    }`}
-                  >
+                <li
+                  key={column.name}
+                  className={`flex items-center gap-1 rounded-md transition-colors ${
+                    open ? "bg-primary-50 ring-1 ring-primary/30" : checked ? "bg-slate-50" : "hover:bg-slate-50"
+                  }`}
+                >
+                  <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 px-2.5 py-2">
                     <input
                       type="checkbox"
                       name="campos"
@@ -207,6 +273,24 @@ export function QueryForm({ columns, query, tableLabel, children }: QueryFormPro
                     </span>
                     <span className="font-mono text-[10px] text-slate-400">{column.type}</span>
                   </label>
+                  {/* Llave foránea: abre/cierra el panel con los detalles de su tabla. */}
+                  {fk && (
+                    <button
+                      type="button"
+                      onClick={() => setOpenFk(open ? null : column.name)}
+                      aria-expanded={open}
+                      aria-controls={FK_PANEL_ID}
+                      aria-label={`${open ? "Ocultar" : "Ver"} detalles de ${fk.refLabel.toLowerCase()} (${column.name})`}
+                      title={`Detalles de ${fk.refLabel.toLowerCase()}`}
+                      className={`mr-1.5 grid size-7 shrink-0 place-items-center rounded-md transition-colors ${
+                        open
+                          ? "bg-primary text-white"
+                          : "text-primary hover:bg-primary-50 dark:text-sky-300"
+                      }`}
+                    >
+                      <Link2 className="size-3.5" aria-hidden />
+                    </button>
+                  )}
                 </li>
               );
             })}
@@ -218,99 +302,113 @@ export function QueryForm({ columns, query, tableLabel, children }: QueryFormPro
           )}
         </Panel>
 
-        {/* ---------- Filtros y ordenamiento ---------- */}
-        <Panel
-          title="Filtros y ordenamiento"
-          meta={
-            `${completeFilters.length} ${completeFilters.length === 1 ? "filtro activo" : "filtros activos"}` +
-            (incompleteCount > 0 ? ` · ${incompleteCount} incompleto${incompleteCount === 1 ? "" : "s"}` : "")
-          }
-        >
-          <div className="space-y-4 p-3">
-            {filters.length === 0 ? (
-              <p className="rounded-md border border-dashed border-slate-300 px-3 py-3 text-xs text-slate-500">
-                Sin filtros: se incluyen todos los registros de la tabla.
-              </p>
-            ) : (
-              <div className="space-y-2">
-                <div className="grid grid-cols-[1fr_1fr_1.2fr_2.25rem] gap-2 text-[10px] font-semibold uppercase text-slate-500">
-                  <span>Campo</span>
-                  <span>Condición</span>
-                  <span>Valor</span>
-                  <span className="sr-only">Quitar</span>
+        {/* ---------- Columna derecha: detalles de tabla foránea + filtros ---------- */}
+        <div className="space-y-4 self-start">
+          {openFk && openFkInfo && (
+            <ForeignKeyPanel
+              fk={openFkInfo}
+              selected={relations[openFk] ?? openFkInfo.defaultColumns}
+              fieldSelected={fields.includes(openFk)}
+              onToggle={(col) => toggleRelation(openFk, col)}
+              onToggleAll={() => toggleAllRelations(openFk)}
+              onClose={() => setOpenFk(null)}
+            />
+          )}
+
+          {/* ---------- Filtros y ordenamiento ---------- */}
+          <Panel
+            title="Filtros y ordenamiento"
+            meta={
+              `${completeFilters.length} ${completeFilters.length === 1 ? "filtro activo" : "filtros activos"}` +
+              (incompleteCount > 0 ? ` · ${incompleteCount} incompleto${incompleteCount === 1 ? "" : "s"}` : "")
+            }
+          >
+            <div className="space-y-4 p-3">
+              {filters.length === 0 ? (
+                <p className="rounded-md border border-dashed border-slate-300 px-3 py-3 text-xs text-slate-500">
+                  Sin filtros: se incluyen todos los registros de la tabla.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  <div className="grid grid-cols-[1fr_1fr_1.2fr_2.25rem] gap-2 text-[10px] font-semibold uppercase text-slate-500">
+                    <span>Campo</span>
+                    <span>Condición</span>
+                    <span>Valor</span>
+                    <span className="sr-only">Quitar</span>
+                  </div>
+                  {filters.map((filter, index) => (
+                    <FilterRowEditor
+                      key={filter.id}
+                      index={index}
+                      filter={filter}
+                      columns={columns}
+                      complete={isComplete(filter)}
+                      onChange={(changes) => updateFilter(filter.id, changes)}
+                      onRemove={() => removeFilter(filter.id)}
+                    />
+                  ))}
                 </div>
-                {filters.map((filter, index) => (
-                  <FilterRowEditor
-                    key={filter.id}
-                    index={index}
-                    filter={filter}
-                    columns={columns}
-                    complete={isComplete(filter)}
-                    onChange={(changes) => updateFilter(filter.id, changes)}
-                    onRemove={() => removeFilter(filter.id)}
-                  />
-                ))}
+              )}
+
+              <div className="flex flex-wrap gap-2">
+                <Button variant="soft" onClick={addFilter}>
+                  <Plus className="size-3.5" aria-hidden /> Agregar filtro
+                </Button>
+                <Button onClick={clearFilters} disabled={filters.length === 0}>
+                  <RotateCcw className="size-3.5" aria-hidden /> Limpiar
+                </Button>
+                <Button onClick={removeLastFilter} disabled={filters.length === 0}>
+                  <Minus className="size-3.5" aria-hidden /> Quitar filtro
+                </Button>
               </div>
-            )}
 
-            <div className="flex flex-wrap gap-2">
-              <Button variant="soft" onClick={addFilter}>
-                <Plus className="size-3.5" aria-hidden /> Agregar filtro
-              </Button>
-              <Button onClick={clearFilters} disabled={filters.length === 0}>
-                <RotateCcw className="size-3.5" aria-hidden /> Limpiar
-              </Button>
-              <Button onClick={removeLastFilter} disabled={filters.length === 0}>
-                <Minus className="size-3.5" aria-hidden /> Quitar filtro
-              </Button>
-            </div>
-
-            {/* ---------- Ordenamiento ---------- */}
-            <div>
-              <p className="text-[10px] font-bold uppercase text-slate-600">Ordenar por</p>
-              <label htmlFor="orden" className="mt-2 block text-[10px] font-semibold uppercase text-slate-500">
-                Campo
-              </label>
-              <div className="mt-1 flex gap-2">
-                <div className="relative flex-1">
-                  <select
-                    id="orden"
-                    name="orden"
-                    value={orderBy}
-                    onChange={(e) => setOrderBy(e.target.value)}
-                    className="h-9 w-full appearance-none rounded-md border border-slate-300 bg-surface px-3 text-sm text-slate-800"
+              {/* ---------- Ordenamiento ---------- */}
+              <div>
+                <p className="text-[10px] font-bold uppercase text-slate-600">Ordenar por</p>
+                <label htmlFor="orden" className="mt-2 block text-[10px] font-semibold uppercase text-slate-500">
+                  Campo
+                </label>
+                <div className="mt-1 flex gap-2">
+                  <div className="relative flex-1">
+                    <select
+                      id="orden"
+                      name="orden"
+                      value={orderBy}
+                      onChange={(e) => setOrderBy(e.target.value)}
+                      className="h-9 w-full appearance-none rounded-md border border-slate-300 bg-surface px-3 text-sm text-slate-800"
+                    >
+                      {columns.map((c) => (
+                        <option key={c.name} value={c.name}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                    <ChevronDown className="pointer-events-none absolute top-2.5 right-3 size-4 text-slate-500" aria-hidden />
+                  </div>
+                  {/* Botones de envío: aplican la consulta con la dirección elegida. */}
+                  <Button
+                    type="submit"
+                    name="dir"
+                    value="asc"
+                    disabled={fields.length === 0 || isPending}
+                    variant={query.dir === "asc" ? "primary" : "outline"}
                   >
-                    {columns.map((c) => (
-                      <option key={c.name} value={c.name}>
-                        {c.name}
-                      </option>
-                    ))}
-                  </select>
-                  <ChevronDown className="pointer-events-none absolute top-2.5 right-3 size-4 text-slate-500" aria-hidden />
+                    <ArrowDownAZ className="size-4" aria-hidden /> A-Z
+                  </Button>
+                  <Button
+                    type="submit"
+                    name="dir"
+                    value="desc"
+                    disabled={fields.length === 0 || isPending}
+                    variant={query.dir === "desc" ? "primary" : "outline"}
+                  >
+                    <ArrowUpZA className="size-4" aria-hidden /> Z-A
+                  </Button>
                 </div>
-                {/* Botones de envío: aplican la consulta con la dirección elegida. */}
-                <Button
-                  type="submit"
-                  name="dir"
-                  value="asc"
-                  disabled={fields.length === 0 || isPending}
-                  variant={query.dir === "asc" ? "primary" : "outline"}
-                >
-                  <ArrowDownAZ className="size-4" aria-hidden /> A-Z
-                </Button>
-                <Button
-                  type="submit"
-                  name="dir"
-                  value="desc"
-                  disabled={fields.length === 0 || isPending}
-                  variant={query.dir === "desc" ? "primary" : "outline"}
-                >
-                  <ArrowUpZA className="size-4" aria-hidden /> Z-A
-                </Button>
               </div>
             </div>
-          </div>
-        </Panel>
+          </Panel>
+        </div>
       </div>
 
       {/* ---------- Resumen y generación ---------- */}
@@ -324,7 +422,8 @@ export function QueryForm({ columns, query, tableLabel, children }: QueryFormPro
             <Badge tone="success">Consulta válida</Badge>
           )}
           <span>
-            {tableLabel} · {fields.length} {fields.length === 1 ? "campo" : "campos"} · {completeFilters.length}{" "}
+            {tableLabel} · {fields.length} {fields.length === 1 ? "campo" : "campos"} ({reportColumnCount}{" "}
+            {reportColumnCount === 1 ? "columna" : "columnas"}) · {completeFilters.length}{" "}
             {completeFilters.length === 1 ? "filtro" : "filtros"} · {orderBy} {query.dir === "asc" ? "A-Z" : "Z-A"}
           </span>
         </p>

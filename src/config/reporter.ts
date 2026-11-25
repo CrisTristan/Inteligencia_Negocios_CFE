@@ -24,15 +24,31 @@ export const DEFAULT_TABLE: TableName = "equipo";
  */
 export const TABLE_CATALOG: Record<
   TableName,
-  { label: string; description: string }
+  {
+    label: string;
+    description: string;
+    /**
+     * Columnas que se muestran en el reporte cuando otra tabla hace
+     * referencia a esta por llave foránea (en lugar del ID numérico).
+     */
+    displayColumns: string[];
+  }
 > = {
-  equipo: { label: "Equipos", description: "Inventario de activos" },
-  mantenimiento: { label: "Mantenimientos", description: "Historial de intervenciones" },
-  tipo_equipo: { label: "Tipos de equipo", description: "Catálogo" },
-  marca: { label: "Marcas", description: "Catálogo" },
-  ubicacion: { label: "Ubicaciones", description: "Subestaciones y circuitos" },
-  estado_operativo: { label: "Estados operativos", description: "Catálogo" },
-  trabajador: { label: "Trabajadores", description: "Personal técnico" },
+  equipo: { label: "Equipos", description: "Inventario de activos", displayColumns: ["num_economico"] },
+  mantenimiento: {
+    label: "Mantenimientos",
+    description: "Historial de intervenciones",
+    displayColumns: ["tipo_mantenimiento", "fecha_programada"],
+  },
+  tipo_equipo: { label: "Tipos de equipo", description: "Catálogo", displayColumns: ["nombre_tipo"] },
+  marca: { label: "Marcas", description: "Catálogo", displayColumns: ["nombre_marca"] },
+  ubicacion: {
+    label: "Ubicaciones",
+    description: "Subestaciones y circuitos",
+    displayColumns: ["subestacion", "circuito"],
+  },
+  estado_operativo: { label: "Estados operativos", description: "Catálogo", displayColumns: ["nombre_estado"] },
+  trabajador: { label: "Trabajadores", description: "Personal técnico", displayColumns: ["nombre"] },
 };
 
 /** Barra de aplicación y encabezado de página. */

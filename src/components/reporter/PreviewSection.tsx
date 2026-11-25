@@ -7,25 +7,28 @@ import { Button } from "@/components/ui/Button";
 import { COMPANY, DOCUMENT } from "@/config/reporter";
 import { formatDate, formatNumber } from "@/lib/format";
 import { describeFilter } from "@/lib/filters";
-import { reporterHref } from "@/lib/url";
-import type { ColumnInfo, ReporterQuery, RowsPage } from "@/types/reporter";
+import { reporterHref, type HrefDefaults } from "@/lib/url";
+import type { ColumnInfo, ReportColumn, ReporterQuery, RowsPage } from "@/types/reporter";
 
 interface PreviewSectionProps {
   title: string;
-  /** Columnas seleccionadas en la sección 03 (las que se muestran). */
-  columns: ColumnInfo[];
+  /** Columnas finales (las llaves foráneas ya sustituidas por su tabla). */
+  columns: ReportColumn[];
   /** Todas las columnas de la tabla (tipos para describir los filtros). */
   allColumns: ColumnInfo[];
   data: RowsPage;
   query: ReporterQuery;
+  /** Para que la paginación omita de la URL lo que va por defecto. */
+  hrefDefaults: HrefDefaults;
 }
 
 /**
  * Sección 04 · Resultado de la consulta presentado como hoja imprimible:
- * solo los campos seleccionados y los registros que cumplen los filtros.
+ * solo los campos seleccionados (las llaves foráneas se muestran con las
+ * columnas de su tabla) y los registros que cumplen los filtros.
  * Los botones Imprimir / Exportar todavía son solo visuales.
  */
-export function PreviewSection({ title, columns, allColumns, data, query }: PreviewSectionProps) {
+export function PreviewSection({ title, columns, allColumns, data, query, hrefDefaults }: PreviewSectionProps) {
   const from = data.total === 0 ? 0 : (data.page - 1) * data.pageSize + 1;
   const to = Math.min(data.page * data.pageSize, data.total);
   const typeOf = (field: string) => allColumns.find((c) => c.name === field)?.type ?? "texto";
@@ -88,8 +91,14 @@ export function PreviewSection({ title, columns, allColumns, data, query }: Prev
               <thead className="bg-navy text-[10px] uppercase text-white dark:bg-slate-200">
                 <tr>
                   {columns.map((c) => (
-                    <th key={c.name} className="px-3 py-2.5 font-bold whitespace-nowrap">
-                      {c.name}
+                    <th
+                      key={c.key}
+                      title={c.source === "fk" ? `De la tabla referenciada por ${c.fk}` : undefined}
+                      className={`px-3 py-2.5 font-bold whitespace-nowrap ${
+                        c.source === "fk" ? "text-sky-200 dark:text-sky-300" : ""
+                      }`}
+                    >
+                      {c.label}
                     </th>
                   ))}
                 </tr>
@@ -107,8 +116,8 @@ export function PreviewSection({ title, columns, allColumns, data, query }: Prev
                 {data.rows.map((row, i) => (
                   <tr key={i} className="border-b border-line even:bg-slate-50">
                     {columns.map((c) => (
-                      <td key={c.name} className="px-3 py-2 whitespace-nowrap text-slate-700">
-                        {row[c.name]}
+                      <td key={c.key} className="px-3 py-2 whitespace-nowrap text-slate-700">
+                        {row[c.key]}
                       </td>
                     ))}
                   </tr>
@@ -125,7 +134,7 @@ export function PreviewSection({ title, columns, allColumns, data, query }: Prev
             <Pagination
               query={{ ...query, page: data.page }}
               totalPages={data.totalPages}
-              totalColumns={allColumns.length}
+              hrefDefaults={hrefDefaults}
             />
           </footer>
         </article>
@@ -141,17 +150,17 @@ export function PreviewSection({ title, columns, allColumns, data, query }: Prev
 function Pagination({
   query,
   totalPages,
-  totalColumns,
+  hrefDefaults,
 }: {
   query: ReporterQuery;
   totalPages: number;
-  totalColumns: number;
+  hrefDefaults: HrefDefaults;
 }) {
   const start = Math.max(1, Math.min(query.page - 2, totalPages - 4));
   const pages = Array.from({ length: Math.min(5, totalPages) }, (_, i) => start + i);
   const base = "grid size-7 place-items-center rounded-md border text-xs font-semibold";
-  // Cada enlace conserva campos y filtros; solo cambia ?page=.
-  const href = (page: number) => reporterHref(query, { page }, totalColumns);
+  // Cada enlace conserva campos, columnas foráneas y filtros; solo cambia ?page=.
+  const href = (page: number) => reporterHref(query, { page }, hrefDefaults);
 
   return (
     <nav className="flex gap-1.5" aria-label="Paginación">

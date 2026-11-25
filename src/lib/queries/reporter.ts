@@ -23,7 +23,9 @@ import {
 import type {
   ColumnInfo,
   FilterOp,
+  ForeignKeyInfo,
   Kpis,
+  ReportColumn,
   ReporterFilter,
   ReporterQuery,
   Row,
@@ -69,27 +71,106 @@ export async function getTables(): Promise<TableInfo[]> {
   }));
 }
 
+/** Llave foránea tal como la declara el esquema. */
+interface ForeignKeyRef {
+  column: string;
+  refTable: TableName;
+  refColumn: string;
+}
+
 /**
- * Sección 03 · Campos de una tabla con su tipo de dato.
- * Las columnas id_* que no son la primera (la PK) son llaves foráneas y se
- * etiquetan como "relación", igual que en el diseño.
+ * Llaves foráneas reales de una tabla (constraints FOREIGN KEY de
+ * information_schema). Solo cuentan las que apuntan a tablas de la lista
+ * blanca, para que sus nombres puedan usarse en el SQL con seguridad.
  */
-export async function getColumns(table: TableName): Promise<ColumnInfo[]> {
-  const rows = await query<{ column_name: string; data_type: string }>(
-    `SELECT column_name, data_type
-       FROM information_schema.columns
-      WHERE table_schema = 'public' AND table_name = $1
-      ORDER BY ordinal_position`,
+async function getForeignKeyRefs(table: TableName): Promise<ForeignKeyRef[]> {
+  const rows = await query<{ column_name: string; ref_table: string; ref_column: string }>(
+    `SELECT kcu.column_name, ccu.table_name AS ref_table, ccu.column_name AS ref_column
+       FROM information_schema.table_constraints tc
+       JOIN information_schema.key_column_usage kcu
+         ON kcu.constraint_name = tc.constraint_name AND kcu.table_schema = tc.table_schema
+       JOIN information_schema.constraint_column_usage ccu
+         ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema
+      WHERE tc.constraint_type = 'FOREIGN KEY'
+        AND tc.table_schema = 'public'
+        AND tc.table_name = $1`,
     [table],
   );
+  return rows
+    .filter((r) => isTableName(r.ref_table))
+    .map((r) => ({ column: r.column_name, refTable: r.ref_table as TableName, refColumn: r.ref_column }));
+}
 
-  return rows.map((r, index) => ({
+/**
+ * Sección 03 · Campos de una tabla con su tipo de dato.
+ * Las llaves foráneas se etiquetan como "relación", igual que en el diseño.
+ */
+export async function getColumns(table: TableName): Promise<ColumnInfo[]> {
+  const [rows, fks] = await Promise.all([
+    query<{ column_name: string; data_type: string }>(
+      `SELECT column_name, data_type
+         FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = $1
+        ORDER BY ordinal_position`,
+      [table],
+    ),
+    getForeignKeyRefs(table),
+  ]);
+  const fkColumns = new Set(fks.map((fk) => fk.column));
+
+  return rows.map((r) => ({
     name: r.column_name,
-    type:
-      index > 0 && r.column_name.startsWith("id_")
-        ? "relación"
-        : (TYPE_LABELS[r.data_type] ?? r.data_type),
+    type: fkColumns.has(r.column_name) ? "relación" : (TYPE_LABELS[r.data_type] ?? r.data_type),
   }));
+}
+
+/** Filas que se muestran en la vista previa del panel de tabla foránea. */
+const FK_SAMPLE_SIZE = 5;
+
+/**
+ * Sección 03 · Panel "Detalles tabla foránea": por cada llave foránea de la
+ * tabla, las columnas de la tabla referenciada, su número de registros y
+ * una muestra de sus primeras filas.
+ */
+export async function getForeignKeys(table: TableName): Promise<ForeignKeyInfo[]> {
+  const refs = await getForeignKeyRefs(table);
+
+  return Promise.all(
+    refs.map(async (ref) => {
+      // ref.refTable está en la lista blanca y ref.refColumn viene del esquema.
+      const [refColumns, [{ total }], sampleRaw] = await Promise.all([
+        getColumns(ref.refTable),
+        query<{ total: number }>(`SELECT COUNT(*)::int AS total FROM "${ref.refTable}"`),
+        query<Record<string, unknown>>(
+          `SELECT * FROM "${ref.refTable}" ORDER BY "${ref.refColumn}" LIMIT $1`,
+          [FK_SAMPLE_SIZE],
+        ),
+      ]);
+      const catalog = TABLE_CATALOG[ref.refTable];
+      const names = new Set(refColumns.map((c) => c.name));
+      const defaults = catalog.displayColumns.filter((c) => names.has(c));
+
+      return {
+        ...ref,
+        refLabel: catalog.label,
+        refDescription: catalog.description,
+        refColumns,
+        // Sin columnas configuradas: la primera que no sea la llave primaria.
+        defaultColumns: defaults.length > 0 ? defaults : [refColumns[1]?.name ?? refColumns[0].name],
+        total,
+        sample: sampleRaw.map((record) =>
+          Object.fromEntries(refColumns.map((c) => [c.name, formatCell(record[c.name], c.type)])),
+        ),
+      };
+    }),
+  );
+}
+
+/** Formato de una celda: NULL -> "—", fechas -> dd/mm/aaaa, resto -> texto. */
+function formatCell(value: unknown, type: string): string {
+  if (value === null || value === undefined) return "—";
+  const text = String(value);
+  return type === "fecha" ? formatDate(text) : text;
 }
 
 /**
@@ -100,6 +181,7 @@ export function resolveQuery(
   params: Record<string, string | string[] | undefined>,
   columns: ColumnInfo[],
   table: TableName,
+  foreignKeys: ForeignKeyInfo[],
 ): ReporterQuery {
   // Si un parámetro viene repetido (?a=1&a=2) se toma el primero.
   const first = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v);
@@ -114,6 +196,7 @@ export function resolveQuery(
   return {
     table,
     fields: fields.length > 0 ? fields : columns.map((c) => c.name),
+    relations: resolveRelations(params, foreignKeys),
     filters: resolveFilters(params, columns),
     orderBy: columns.some((c) => c.name === orden) ? orden! : columns[0].name,
     dir: first(params.dir) === "desc" ? "desc" : "asc",
@@ -125,6 +208,30 @@ export function resolveQuery(
 function toArray(v: string | string[] | undefined): string[] {
   if (v === undefined) return [];
   return Array.isArray(v) ? v : [v];
+}
+
+/**
+ * Columnas elegidas de cada tabla foránea desde ?rel=<llave>.<columna>
+ * (repetido). Solo valen llaves foráneas reales y columnas que existan en
+ * la tabla referenciada; si una llave se queda sin columnas, usa las de
+ * por defecto.
+ */
+function resolveRelations(
+  params: Record<string, string | string[] | undefined>,
+  foreignKeys: ForeignKeyInfo[],
+): Record<string, string[]> {
+  const requested = toArray(params.rel);
+  return Object.fromEntries(
+    foreignKeys.map((fk) => {
+      const chosen = new Set(
+        requested
+          .filter((r) => r.startsWith(`${fk.column}.`))
+          .map((r) => r.slice(fk.column.length + 1)),
+      );
+      const valid = fk.refColumns.filter((c) => chosen.has(c.name)).map((c) => c.name);
+      return [fk.column, valid.length > 0 ? valid : fk.defaultColumns];
+    }),
+  );
 }
 
 /** Máximo de filtros que se aceptan desde la URL. */
@@ -178,6 +285,9 @@ function escapeLike(value: string): string {
  * Arma la cláusula WHERE de los filtros (ya validados por resolveFilters).
  * Los nombres de columna están en la lista blanca de `columns`; los valores
  * viajan siempre como parámetros $n, empezando en $1.
+ *
+ * Las columnas se califican con el alias `t` de la tabla principal: con los
+ * JOIN de las llaves foráneas, "id_tipo" existiría en dos tablas.
  */
 function buildWhere(
   filters: ReporterFilter[],
@@ -193,7 +303,7 @@ function buildWhere(
   const conditions = filters.flatMap((f) => {
     const type = types.get(f.field);
     if (type === undefined) return [];
-    const col = `"${f.field}"`;
+    const col = `t."${f.field}"`;
     const kind = kindOf(type);
     const cast = kind === "number" ? "::int" : kind === "date" ? "::date" : "";
 
@@ -247,54 +357,64 @@ export function resolveTable(
 }
 
 /**
- * Sección 04 · Filas de la tabla elegida: solo los campos seleccionados,
- * filtradas, ordenadas y paginadas. Los valores se devuelven como texto
- * listo para mostrar.
+ * Sección 04 · Filas de la tabla elegida con las columnas finales del
+ * reporte (las llaves foráneas ya sustituidas por las columnas de su tabla
+ * mediante LEFT JOIN), filtradas, ordenadas y paginadas. Los valores se
+ * devuelven como texto listo para mostrar.
  *
  * @param columns todas las columnas de la tabla (para validar los filtros).
+ * @param reportColumns columnas finales (ver buildReportColumns).
  */
 export async function getRows(
   q: ReporterQuery,
   columns: ColumnInfo[],
+  reportColumns: ReportColumn[],
+  foreignKeys: ForeignKeyInfo[],
 ): Promise<RowsPage> {
   const where = buildWhere(q.filters, columns);
 
   // Total de registros que cumplen los filtros, para calcular las páginas.
+  // No necesita los JOIN: son LEFT JOIN por llave y no cambian el conteo.
   const [{ total }] = await query<{ total: number }>(
-    `SELECT COUNT(*)::int AS total FROM "${q.table}" ${where.sql}`,
+    `SELECT COUNT(*)::int AS total FROM "${q.table}" AS t ${where.sql}`,
     where.params,
   );
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const page = Math.min(q.page, totalPages); // evita páginas fuera de rango
 
-  // q.table, q.fields y q.orderBy ya están validados (ver resolveTable /
-  // resolveQuery); los valores de filtro, LIMIT y OFFSET viajan como
-  // parámetros, numerados después de los del WHERE.
-  const selected = columns.filter((c) => q.fields.includes(c.name));
+  // Todos los identificadores vienen de listas blancas: la tabla de
+  // TABLE_CATALOG, las columnas y llaves de information_schema. Los valores
+  // de filtro, LIMIT y OFFSET viajan como parámetros.
+  const alias = (fk: string) => `"r_${fk}"`;
+  const usedFks = foreignKeys.filter((fk) => reportColumns.some((c) => c.fk === fk.column));
+  const joins = usedFks
+    .map(
+      (fk) =>
+        `LEFT JOIN "${fk.refTable}" AS ${alias(fk.column)} ON ${alias(fk.column)}."${fk.refColumn}" = t."${fk.column}"`,
+    )
+    .join("\n       ");
+  const select = reportColumns
+    .map((c) => (c.source === "fk" ? `${alias(c.fk!)}."${c.refColumn}" AS "${c.key}"` : `t."${c.key}"`))
+    .join(", ");
+
+  // Ordenar por una llave foránea mostrada = ordenar por su primera columna
+  // visible (alfabético por nombre_marca, no por el número de id_marca).
+  const firstFkColumn = reportColumns.find((c) => c.fk === q.orderBy);
+  const orderExpr = firstFkColumn ? `${alias(q.orderBy)}."${firstFkColumn.refColumn}"` : `t."${q.orderBy}"`;
+
   const n = where.params.length;
   const raw = await query<Record<string, unknown>>(
-    `SELECT ${selected.map((c) => `"${c.name}"`).join(", ")}
-       FROM "${q.table}"
+    `SELECT ${select}
+       FROM "${q.table}" AS t
+       ${joins}
        ${where.sql}
-      ORDER BY "${q.orderBy}" ${q.dir === "desc" ? "DESC" : "ASC"} NULLS LAST
+      ORDER BY ${orderExpr} ${q.dir === "desc" ? "DESC" : "ASC"} NULLS LAST, t."${columns[0].name}"
       LIMIT $${n + 1} OFFSET $${n + 2}`,
     [...where.params, PAGE_SIZE, (page - 1) * PAGE_SIZE],
   );
 
-  const dateColumns = new Set(
-    selected.filter((c) => c.type === "fecha").map((c) => c.name),
-  );
-
-  // Formato de cada celda: NULL -> "—", fechas -> dd/mm/aaaa, resto -> texto.
   const rows: Row[] = raw.map((record) =>
-    Object.fromEntries(
-      selected.map(({ name }) => {
-        const value = record[name];
-        if (value === null || value === undefined) return [name, "—"];
-        const text = String(value);
-        return [name, dateColumns.has(name) ? formatDate(text) : text];
-      }),
-    ),
+    Object.fromEntries(reportColumns.map((c) => [c.key, formatCell(record[c.key], c.type)])),
   );
 
   return { rows, total, page, pageSize: PAGE_SIZE, totalPages };
