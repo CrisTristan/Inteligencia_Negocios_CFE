@@ -1,6 +1,7 @@
 import { Database } from "lucide-react";
 import { APP } from "@/config/reporter";
 import { ThemeToggle } from "@/components/layout/ThemeToggle";
+import { NavLinks } from "@/components/layout/NavLinks";
 
 /** Barra superior oscura: marca, conexión activa y usuario en sesión. */
 export function AppBar() {
@@ -16,6 +17,9 @@ export function AppBar() {
             <p className="text-sm font-bold">{APP.name}</p>
             <p className="text-[10px] uppercase tracking-wide text-white/60">{APP.module}</p>
           </div>
+          <span className="ml-3 hidden md:block">
+            <NavLinks />
+          </span>
         </div>
 
         {/* Conexión y usuario */}
