@@ -1,26 +1,60 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/*
+ * Variante `dark:` de Tailwind controlada por el atributo data-theme="dark"
+ * en <html> (lo pone el script del layout y el botón ThemeToggle), en lugar
+ * de depender solo de la preferencia del sistema operativo.
+ */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/*
+ * Tokens de diseño tomados de docs/reporteador-de-tienda.png.
+ * Con Tailwind v4, cada --color-* genera utilidades (bg-navy, text-primary,
+ * border-line...) y cada --font-* genera font-sans / font-mono / font-signature.
+ */
+@theme {
+  --color-navy: #16283a;        /* barra de aplicación, encabezados de tabla, banda de totales */
+  --color-primary: #1d5a7a;     /* acciones principales, badges de sección, títulos */
+  --color-primary-50: #e8f1f6;  /* fondos suaves del color primario */
+  --color-canvas: #f2f4f7;      /* fondo general de la página */
+  --color-surface: #ffffff;     /* tarjetas, campos y hoja del reporte */
+  --color-line: #e2e8f0;        /* bordes de tarjetas y campos */
+
+  --font-sans: var(--font-inter);
+  --font-mono: var(--font-jetbrains-mono);
+  --font-signature: var(--font-lora); /* firma manuscrita (sección 06) */
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
+/*
+ * Modo oscuro. Para no duplicar clases `dark:` en cada componente, se
+ * redefinen los tokens y se INVIERTE la escala slate: los fondos claros
+ * (slate-50/100) pasan a ser oscuros y los textos oscuros (slate-700/900)
+ * pasan a ser claros. Así `text-slate-900` sigue significando "texto de
+ * mayor contraste" en ambos temas. El blanco (text-white) no cambia.
+ */
+[data-theme="dark"] {
+  color-scheme: dark; /* barras de desplazamiento y controles nativos oscuros */
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --color-navy: #0f1d2a;
+  --color-primary: #2f7fa8;
+  --color-primary-50: #16384b;
+  --color-canvas: #0b141d;
+  --color-surface: #121e2a;
+  --color-line: #233244;
+
+  --color-slate-50: #172331;
+  --color-slate-100: #1c2a3a;
+  --color-slate-200: #283849;
+  --color-slate-300: #34465a;
+  --color-slate-400: #7d8ea3;
+  --color-slate-500: #94a3b8;
+  --color-slate-600: #a9b6c6;
+  --color-slate-700: #cbd5e1;
+  --color-slate-800: #e2e8f0;
+  --color-slate-900: #f1f5f9;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--color-canvas);
+  color: var(--color-slate-800);
 }

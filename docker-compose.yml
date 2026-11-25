@@ -1,0 +1,37 @@
+# =====================================================================
+# SIGIAM-CC · Servicios de Docker
+# Solo se levanta PostgreSQL; la app de Next.js corre con `npm run dev`.
+#
+#   docker compose up -d      -> crea/arranca la base de datos
+#   docker compose down -v    -> la detiene y BORRA el volumen (útil para
+#                                volver a ejecutar los scripts de init)
+# =====================================================================
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: sigiam-cc-db
+    restart: unless-stopped
+    environment:
+      # Estas credenciales deben coincidir con DATABASE_URL en .env.local
+      POSTGRES_USER: sigiam
+      POSTGRES_PASSWORD: sigiam
+      POSTGRES_DB: sigiam_cc
+    ports:
+      # Host 5433 -> contenedor 5432 (el 5432 del host suele estar ocupado
+      # por otra instalación de PostgreSQL)
+      - "5433:5432"
+    volumes:
+      # Datos persistentes entre reinicios del contenedor
+      - sigiam_pgdata:/var/lib/postgresql/data
+      # Scripts que se ejecutan SOLO la primera vez (volumen vacío),
+      # en orden alfabético: 01_schema.sql -> 02_seed.sql
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # Permite saber cuándo la base ya acepta conexiones
+      test: ["CMD-SHELL", "pg_isready -U sigiam -d sigiam_cc"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  sigiam_pgdata:
